@@ -1,0 +1,13 @@
+# Ignore the actual heavy library files
+venv/
+.venv/
+env/
+
+# Ignore Python background system files
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore local system junk
+.DS_Store
+Thumbs.db
