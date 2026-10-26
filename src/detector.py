@@ -8,7 +8,7 @@ This is the pre-trained artificial intelligence model that looks at facial featu
 '''
 # Import main libaries
 import cv2 # For camera and video handling (pixels)
-from fer import FER # pre-trained model & identifies facial features
+from fer.fer import FER # pre-trained model & identifies facial features
 
 detector = FER(mtcnn=False) # Initialize the AI model; mtcnn=False makes it faster for real-time video streaming
 
