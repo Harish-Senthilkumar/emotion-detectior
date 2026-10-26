@@ -36,7 +36,7 @@ while True:
         # Unpack the top-left coordinate (x,y) along with the width (w) and height (h)
         x, y, w, h = face["box"]
         # Extract the string name of the emotion with the highest probability score
-        emotion = face["dominant_emotion"]
+        emotion = max(face["emotions"], key=face["emotions"].get)
         # Look up the exact floating-point percentage score for that dominant emotion
         confidence = face["emotions"][emotion]
 
