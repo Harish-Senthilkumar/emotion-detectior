@@ -10,7 +10,7 @@ This is the pre-trained artificial intelligence model that looks at facial featu
 import cv2 # For camera and video handling (pixels)
 from fer.fer import FER # pre-trained model & identifies facial features
 
-detector = FER(mtcnn=False) # Initialize the AI model; mtcnn=False makes it faster for real-time video streaming
+detector = FER(mtcnn=True) # Initialize the AI model; mtcnn=False makes it faster for real-time video streaming
 
 # Lets python connect to our hardware's default camera
 video_capture = cv2.VideoCapture(0)
@@ -63,7 +63,7 @@ while True:
 
 # Pause execution 1ms to look for keyboard inputs from the user
     # If the user presses the 'q' key down on their keyboard, terminate the loop
-    if cv2.waitkey(1) & 0xFF == ord("q"):
+    if cv2.waitKey(1) & 0xFF == ord("q"):
         break # break out of the tracking infinite-loop
 
 
