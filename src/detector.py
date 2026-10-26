@@ -67,3 +67,6 @@ if cv2.waitkey(1) & 0xFF == ord("q"):
     break #break out of the tracking infinite-loop
 
 
+# Shut down the active camera lens connection and turn off the webcame indector hardware light
+video_capture.release()
+# Close and completely wipe out all windows opened by OpenCV
