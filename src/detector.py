@@ -57,5 +57,13 @@ while True:
             (0, 255, 0),
             2,
         )
-        
+
+# Making a clean user desktop pop-up interface screen to display the frame array
+cv2.imshow("Live Emotion Detector", frame)
+
+# Pause execution 1ms to look for keyboard inputs from the user
+    # If the user presses the 'q' key down on their keyboard, terminate the loop
+if cv2.waitkey(1) & 0xFF == ord("q"):
+    break #break out of the tracking infinite-loop
+
 
