@@ -58,13 +58,13 @@ while True:
             2,
         )
 
-# Making a clean user desktop pop-up interface screen to display the frame array
-cv2.imshow("Live Emotion Detector", frame)
+    # Making a clean user desktop pop-up interface screen to display the frame array
+    cv2.imshow("Live Emotion Detector", frame)
 
 # Pause execution 1ms to look for keyboard inputs from the user
     # If the user presses the 'q' key down on their keyboard, terminate the loop
-if cv2.waitkey(1) & 0xFF == ord("q"):
-    break #break out of the tracking infinite-loop
+    if cv2.waitkey(1) & 0xFF == ord("q"):
+        break # break out of the tracking infinite-loop
 
 
 # Shut down the active camera lens connection and turn off the webcame indector hardware light
