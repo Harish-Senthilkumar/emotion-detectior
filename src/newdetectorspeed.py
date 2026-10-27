@@ -1,178 +1,385 @@
-import os
-
 import cv2
+import random
+import threading
+import time
+from queue import Queue, Empty, Full
+
 from fer.fer import FER
 
 
+# -------------------- Settings --------------------
+
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+
+DETECTION_WIDTH = 320
+DETECT_EVERY_N_FRAMES = 5
+MIN_CONFIDENCE = 0.40
+
+DUCK_X = 120
+DUCK_RADIUS = 24
+DUCK_MOVE_STEP = 35
+
+OBSTACLE_RADIUS = 22
+START_SPEED = 4
+MAX_SPEED = 14
+SPEED_INCREASE_EVERY = 5
+
 # Use MTCNN to avoid the missing Haar cascade file error.
+# Emotion detection runs in a separate thread to keep the camera preview responsive.
 detector = FER(mtcnn=True)
 
-video_capture = cv2.VideoCapture(0)
 
-# Ask the webcam for a smaller frame to reduce processing.
-video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+# -------------------- Camera --------------------
+
+video_capture = cv2.VideoCapture(0)
+video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
 
 if not video_capture.isOpened():
     raise RuntimeError("Could not open the webcam.")
 
 
-# Load duck.png from the same folder as this Python script.
-script_folder = os.path.dirname(os.path.abspath(__file__))
-duck_path = os.path.join(script_folder, "duck.png")
-duck = cv2.imread(duck_path, cv2.IMREAD_UNCHANGED)
+# -------------------- Background emotion detection --------------------
 
-if duck is None:
-    raise FileNotFoundError(
-        f"Could not load {duck_path}. Put a transparent duck.png "
-        "in the same folder as this script."
+# A queue of size one keeps only the newest frame waiting for analysis.
+# This prevents a backlog of old frames from building up.
+detection_queue = Queue(maxsize=1)
+results_lock = threading.Lock()
+
+latest_faces = []
+latest_emotion = "Waiting..."
+latest_confidence = 0.0
+worker_running = True
+
+
+def emotion_worker():
+    """Analyze webcam frames in the background."""
+    global latest_faces
+    global latest_emotion
+    global latest_confidence
+
+    while worker_running:
+        try:
+            small_frame = detection_queue.get(timeout=0.1)
+        except Empty:
+            continue
+
+        if small_frame is None:
+            break
+
+        try:
+            faces = detector.detect_emotions(small_frame)
+
+            emotion = "No face"
+            confidence = 0.0
+
+            if faces:
+                emotions = faces[0]["emotions"]
+                emotion = max(emotions, key=emotions.get)
+                confidence = emotions[emotion]
+
+            with results_lock:
+                latest_faces = faces
+                latest_emotion = emotion
+                latest_confidence = confidence
+
+        except Exception as error:
+            print(f"Emotion detection error: {error}")
+
+
+worker_thread = threading.Thread(target=emotion_worker, daemon=True)
+worker_thread.start()
+
+
+def send_latest_frame_for_detection(frame):
+    """Queue a small frame, replacing an older waiting frame if necessary."""
+    try:
+        detection_queue.put_nowait(frame)
+    except Full:
+        try:
+            detection_queue.get_nowait()
+        except Empty:
+            pass
+
+        try:
+            detection_queue.put_nowait(frame)
+        except Full:
+            pass
+
+
+# -------------------- Game helpers --------------------
+
+def draw_duck(frame, center_x, center_y):
+    """Draw a simple cartoon duck using OpenCV shapes."""
+    # Body and head
+    cv2.ellipse(
+        frame,
+        (center_x, center_y),
+        (DUCK_RADIUS + 10, DUCK_RADIUS),
+        0, 0, 360,
+        (0, 220, 255),
+        -1
+    )
+    cv2.circle(
+        frame,
+        (center_x + 17, center_y - 20),
+        16,
+        (0, 220, 255),
+        -1
     )
 
-duck = cv2.resize(duck, (80, 80))
+    # Beak
+    cv2.fillConvexPoly(
+        frame,
+        [
+            (center_x + 29, center_y - 22),
+            (center_x + 48, center_y - 16),
+            (center_x + 29, center_y - 10),
+        ],
+        (0, 130, 255)
+    )
+
+    # Eye
+    cv2.circle(
+        frame,
+        (center_x + 21, center_y - 24),
+        3,
+        (0, 0, 0),
+        -1
+    )
+
+    # Wing
+    cv2.ellipse(
+        frame,
+        (center_x - 5, center_y),
+        (13, 8),
+        -15, 0, 360,
+        (0, 180, 230),
+        -1
+    )
 
 
-def overlay_png(background, overlay, x, y):
-    """Draw a transparent PNG over an OpenCV frame."""
-    overlay_height, overlay_width = overlay.shape[:2]
-
-    # Keep the image inside the frame.
-    x = max(0, min(x, background.shape[1] - overlay_width))
-    y = max(0, min(y, background.shape[0] - overlay_height))
-
-    background_area = background[
-        y : y + overlay_height,
-        x : x + overlay_width
-    ]
-
-    if overlay.shape[2] == 4:
-        # Use the PNG's alpha channel for transparency.
-        alpha = overlay[:, :, 3:4].astype(float) / 255.0
-        foreground = overlay[:, :, :3].astype(float)
-        background_area_float = background_area.astype(float)
-
-        blended = alpha * foreground + (1 - alpha) * background_area_float
-        background[
-            y : y + overlay_height,
-            x : x + overlay_width
-        ] = blended.astype("uint8")
-    else:
-        # Handle a PNG that has no transparency channel.
-        background[
-            y : y + overlay_height,
-            x : x + overlay_width
-        ] = overlay[:, :, :3]
-
-    return background
+def make_obstacle(frame_width, frame_height):
+    """Create an obstacle at the right edge with a random vertical position."""
+    margin = 55
+    return {
+        "x": frame_width + OBSTACLE_RADIUS,
+        "y": random.randint(margin, frame_height - margin),
+        "scored": False,
+    }
 
 
-# Speed and display settings.
-DETECT_EVERY_N_FRAMES = 5
-DETECTION_WIDTH = 320
-MIN_CONFIDENCE = 0.40
+# -------------------- Main game loop --------------------
 
 frame_count = 0
-latest_faces = []
-current_emotion = "Waiting..."
-duck_y = 130
+duck_y = CAMERA_HEIGHT // 2
+score = 0
+game_over = False
 
-print("Webcam active. Press 'q' in the video window to quit.")
+obstacles = []
+last_obstacle_time = time.time()
+obstacle_interval = 1.5
 
-while True:
-    ret, frame = video_capture.read()
+fps = 0.0
+last_fps_time = time.time()
+fps_frame_count = 0
 
-    if not ret:
-        print("Camera reading failed.")
-        break
+print("Game started. Press 'q' to quit. Press 'r' to restart after game over.")
 
-    frame_count += 1
-    height, width = frame.shape[:2]
+try:
+    while True:
+        ret, frame = video_capture.read()
 
-    # Run emotion detection every few frames, using a smaller image.
-    if frame_count % DETECT_EVERY_N_FRAMES == 0:
-        detection_scale = width / DETECTION_WIDTH
-        small_height = max(1, int(height / detection_scale))
+        if not ret:
+            print("Camera reading failed.")
+            break
 
-        small_frame = cv2.resize(
-            frame,
-            (DETECTION_WIDTH, small_height)
+        frame = cv2.flip(frame, 1)
+        frame_height, frame_width = frame.shape[:2]
+        frame_count += 1
+        fps_frame_count += 1
+
+        # Submit a smaller frame for background emotion analysis.
+        if frame_count % DETECT_EVERY_N_FRAMES == 0:
+            detection_height = max(
+                1,
+                int(frame_height * DETECTION_WIDTH / frame_width)
+            )
+            small_frame = cv2.resize(
+                frame,
+                (DETECTION_WIDTH, detection_height)
+            )
+            send_latest_frame_for_detection(small_frame)
+
+        # Read the most recent emotion result.
+        with results_lock:
+            faces = latest_faces
+            emotion = latest_emotion
+            confidence = latest_confidence
+
+        # Use the detected expression as a game control.
+        if confidence >= MIN_CONFIDENCE:
+            if emotion == "happy":
+                duck_y -= DUCK_MOVE_STEP
+            elif emotion == "surprise":
+                duck_y += DUCK_MOVE_STEP
+
+        # Keep the duck inside the camera image.
+        duck_y = max(DUCK_RADIUS + 10, min(frame_height - DUCK_RADIUS - 10, duck_y))
+
+        # Game speed increases as the score rises.
+        speed = min(
+            MAX_SPEED,
+            START_SPEED + score // SPEED_INCREASE_EVERY
         )
 
-        latest_faces = detector.detect_emotions(small_frame)
+        # Spawn obstacles.
+        now = time.time()
+        if not game_over and now - last_obstacle_time >= obstacle_interval:
+            obstacles.append(make_obstacle(frame_width, frame_height))
+            last_obstacle_time = now
 
-        # Use the first detected face to control the duck.
-        if latest_faces:
-            emotions = latest_faces[0]["emotions"]
-            current_emotion = max(emotions, key=emotions.get)
-            confidence = emotions[current_emotion]
+        # Move obstacles and check for collisions and points.
+        if not game_over:
+            for obstacle in obstacles:
+                obstacle["x"] -= speed
 
-            if confidence >= MIN_CONFIDENCE:
-                if current_emotion == "happy":
-                    duck_y = max(90, duck_y - 35)       # Duck moves up
-                elif current_emotion == "surprise":
-                    duck_y = min(height - 90, duck_y + 35)  # Duck moves down
-            else:
-                current_emotion = "Uncertain"
-        else:
-            current_emotion = "No face detected"
+                distance_x = abs(obstacle["x"] - DUCK_X)
+                distance_y = abs(obstacle["y"] - duck_y)
 
-    # Draw the most recent face detections.
-    if latest_faces:
-        detection_scale = width / DETECTION_WIDTH
+                # Simple circular collision check.
+                if (
+                    distance_x < OBSTACLE_RADIUS + DUCK_RADIUS
+                    and distance_y < OBSTACLE_RADIUS + DUCK_RADIUS
+                ):
+                    game_over = True
 
-        for face in latest_faces:
-            x, y, box_width, box_height = face["box"]
+                # Earn a point when an obstacle passes the duck.
+                if not obstacle["scored"] and obstacle["x"] < DUCK_X:
+                    obstacle["scored"] = True
+                    score += 1
 
-            # Convert the face box to the original frame size.
-            x = int(x * detection_scale)
-            y = int(y * detection_scale)
-            box_width = int(box_width * detection_scale)
-            box_height = int(box_height * detection_scale)
+            # Remove obstacles that have moved off screen.
+            obstacles = [
+                obstacle
+                for obstacle in obstacles
+                if obstacle["x"] > -OBSTACLE_RADIUS
+            ]
 
-            emotions = face["emotions"]
-            emotion = max(emotions, key=emotions.get)
-            confidence = emotions[emotion]
+        # Draw obstacles.
+        for obstacle in obstacles:
+            cv2.circle(
+                frame,
+                (int(obstacle["x"]), obstacle["y"]),
+                OBSTACLE_RADIUS,
+                (40, 40, 230),
+                -1
+            )
+            cv2.circle(
+                frame,
+                (int(obstacle["x"] - 7), obstacle["y"] - 7),
+                5,
+                (120, 120, 255),
+                -1
+            )
 
-            if confidence >= MIN_CONFIDENCE:
-                cv2.rectangle(
-                    frame,
-                    (x, y),
-                    (x + box_width, y + box_height),
-                    (0, 255, 0),
-                    2
-                )
+        # Draw the duck and game information.
+        draw_duck(frame, DUCK_X, duck_y)
 
-                label = f"{emotion.capitalize()} ({confidence:.0%})"
-                cv2.putText(
-                    frame,
-                    label,
-                    (x, max(y - 10, 20)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 0),
-                    2
-                )
+        emotion_text = emotion.capitalize()
+        if confidence >= MIN_CONFIDENCE:
+            emotion_text += f" ({confidence:.0%})"
 
-    # Display the emotion label and duck in the top-right corner.
-    label_x = max(10, width - 190)
-    cv2.putText(
-        frame,
-        f"Emotion: {current_emotion.capitalize()}",
-        (label_x, 35),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (0, 255, 255),
-        2
-    )
+        cv2.putText(
+            frame,
+            f"Expression: {emotion_text}",
+            (15, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 255),
+            2
+        )
 
-    duck_x = width - 100
-    frame = overlay_png(frame, duck, duck_x, duck_y)
+        cv2.putText(
+            frame,
+            f"Score: {score}",
+            (15, 65),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2
+        )
 
-    cv2.imshow("Duck Emotion Game", frame)
+        cv2.putText(
+            frame,
+            f"Speed: {speed}",
+            (15, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2
+        )
 
-    # Press q while the video window is selected to quit.
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
+        # Show approximate camera display FPS.
+        current_time = time.time()
+        if current_time - last_fps_time >= 1.0:
+            fps = fps_frame_count / (current_time - last_fps_time)
+            fps_frame_count = 0
+            last_fps_time = current_time
 
+        cv2.putText(
+            frame,
+            f"Camera FPS: {fps:.0f}",
+            (frame_width - 180, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2
+        )
 
-video_capture.release()
-cv2.destroyAllWindows()
+        if game_over:
+            cv2.putText(
+                frame,
+                "GAME OVER",
+                (frame_width // 2 - 150, frame_height // 2 - 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (0, 0, 255),
+                3
+            )
+            cv2.putText(
+                frame,
+                "Press R to restart",
+                (frame_width // 2 - 130, frame_height // 2 + 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2
+            )
+
+        cv2.imshow("Duck Emotion Game", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord("q"):
+            break
+
+        if key == ord("r") and game_over:
+            score = 0
+            duck_y = frame_height // 2
+            obstacles = []
+            game_over = False
+            last_obstacle_time = time.time()
+
+finally:
+    worker_running = False
+
+    try:
+        detection_queue.put_nowait(None)
+    except Full:
+        pass
+
+    worker_thread.join(timeout=2)
+    video_capture.release()
+    cv2.destroyAllWindows()
